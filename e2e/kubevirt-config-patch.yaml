@@ -1,0 +1,13 @@
+spec:
+  configuration:
+    developerConfiguration:
+      featureGates:
+        - HostDevices
+        - HostDevicesWithDRA
+    mediatedDevicesConfiguration:
+      mediatedDeviceTypes: []
+    permittedHostDevices:
+      mediatedDevices:
+        - mdevNameSelector: "VFIO AP Passthrough Device"
+          resourceName: "ibm.com/crypto-express"
+          externalResourceProvider: true
