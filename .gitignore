@@ -9,3 +9,6 @@ flake.lock
 
 # Health report (make ci-health-report)
 /.health/
+
+# Kustomize overlays used by the deployment scripts
+deploy/kustomize/overlays/my-cluster

@@ -28,14 +28,14 @@ ensure_ssh_key() {
 # virtctl / plain-ssh helpers
 # ---------------------------------------------------------------------------
 
-# Probe once whether the installed virtctl supports --local-ssh; result is
-# cached in VIRTCTL_HAS_LOCAL_SSH (1 or 0) for subsequent calls.
+# Probe once whether the installed virtctl supports --local-ssh-opts; result
+# is cached in VIRTCTL_HAS_LOCAL_SSH_OPTS (1 or 0) for subsequent calls.
 _probe_virtctl_ssh() {
-  [[ -n "${VIRTCTL_HAS_LOCAL_SSH:-}" ]] && return
-  if virtctl ssh --help 2>&1 | grep -qE -- '--local-ssh([[:space:]]|=|$)'; then
-    VIRTCTL_HAS_LOCAL_SSH=1
+  [[ -n "${VIRTCTL_HAS_LOCAL_SSH_OPTS:-}" ]] && return
+  if virtctl ssh --help 2>&1 | grep -q -- '--local-ssh-opts'; then
+    VIRTCTL_HAS_LOCAL_SSH_OPTS=1
   else
-    VIRTCTL_HAS_LOCAL_SSH=0
+    VIRTCTL_HAS_LOCAL_SSH_OPTS=0
   fi
 }
 
@@ -46,11 +46,10 @@ _build_virtctl_ssh_args() {
   local cmd="$2"
   _args_ref=(-n "${TEST_NS}")
   [[ -n "${SSH_PRIV:-}" ]] && _args_ref+=(-i "${SSH_PRIV}")
-  if [[ "${VIRTCTL_HAS_LOCAL_SSH}" == "1" ]]; then
-    _args_ref+=(--local-ssh=true)
-    _args_ref+=(--local-ssh-opts=-o StrictHostKeyChecking=no)
-    _args_ref+=(--local-ssh-opts=-o UserKnownHostsFile=/dev/null)
-    _args_ref+=(--local-ssh-opts=-o ConnectTimeout=8)
+  if [[ "${VIRTCTL_HAS_LOCAL_SSH_OPTS}" == "1" ]]; then
+    _args_ref+=("--local-ssh-opts=-o StrictHostKeyChecking=no")
+    _args_ref+=("--local-ssh-opts=-o UserKnownHostsFile=/dev/null")
+    _args_ref+=("--local-ssh-opts=-o ConnectTimeout=8")
   fi
   _args_ref+=(-c "${cmd}" "fedora@vmi/${VM_NAME}")
 }
@@ -95,7 +94,7 @@ guest_ssh() {
 # moved into the VM (the queue line should be absent on the host).
 _show_host_lszcrypt() {
   echo "--- host lszcrypt (queue line gone means the VM holds it) ---"
-  lszcrypt || true
+  run_on_node 'lszcrypt || true' || true
   echo
 }
 

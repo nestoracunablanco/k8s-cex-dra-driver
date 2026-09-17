@@ -27,17 +27,48 @@ apply_registry_manifest() {
 }
 
 wait_for_registry() {
-  for i in $(seq 1 30); do
-    if curl -sf "http://${REGISTRY_ADDR}/v2/" >/dev/null; then
-      echo "registry ready at http://${REGISTRY_ADDR}/v2/"
-      return
-    fi
-    echo "  waiting for registry HTTP on ${REGISTRY_ADDR} (${i}/30)"
-    sleep 2
-  done
+  # rollout status already confirmed the pod is ready (readiness probe on :5000
+  # passed), so the registry is serving. Verify via kubectl exec — no workstation
+  # network access to the NodePort required.
+  local pod
+  pod="$(kubectl -n "${REGISTRY_NS}" get pod -l app=cex-dra-registry \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -z "$pod" ]]; then
+    kubectl -n "${REGISTRY_NS}" get pods,svc -o wide || true
+    fail "in-cluster registry pod not found in ${REGISTRY_NS}"
+  fi
+  if kubectl -n "${REGISTRY_NS}" exec "${pod}" -- \
+      wget -qO- http://localhost:5000/v2/ >/dev/null 2>&1; then
+    echo "in-cluster registry ready at svc/${REGISTRY_NAME}.${REGISTRY_NS}.svc.cluster.local:5000"
+    return
+  fi
   kubectl -n "${REGISTRY_NS}" get pods,svc -o wide || true
-  kubectl -n "${REGISTRY_NS}" logs "deploy/${REGISTRY_NAME}" --tail=50 || true
-  fail "in-cluster registry did not become ready on ${REGISTRY_ADDR}"
+  kubectl -n "${REGISTRY_NS}" logs "${pod}" --tail=50 || true
+  fail "in-cluster registry did not become ready in ${REGISTRY_NS}"
+}
+
+start_registry_port_forward() {
+  stop_registry_port_forward
+  local local_port="${REGISTRY_LOCAL_PORT:-5000}"
+  echo "Starting port-forward to registry on 127.0.0.1:${local_port}..."
+  kubectl -n "${REGISTRY_NS}" port-forward "svc/${REGISTRY_NAME}" "${local_port}:5000" >/dev/null 2>&1 &
+  REGISTRY_PF_PID=$!
+  for _ in $(seq 1 20); do
+    if curl -sf "http://127.0.0.1:${local_port}/v2/" >/dev/null 2>&1; then
+      echo "Registry port-forward active on 127.0.0.1:${local_port}"
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "failed to connect to registry via port-forward on 127.0.0.1:${local_port}"
+}
+
+stop_registry_port_forward() {
+  if [[ -n "${REGISTRY_PF_PID:-}" ]] && kill -0 "${REGISTRY_PF_PID}" 2>/dev/null; then
+    kill "${REGISTRY_PF_PID}" 2>/dev/null || true
+    wait "${REGISTRY_PF_PID}" 2>/dev/null || true
+  fi
+  REGISTRY_PF_PID=""
 }
 
 install_registry() {
@@ -46,12 +77,16 @@ install_registry() {
   echo "Driver image will be ${IMAGE}"
   apply_registry_manifest
   wait_for_registry
+  start_registry_port_forward
 }
 
 image_in_registry() {
-  [[ -n "${REGISTRY_ADDR}" ]] || return 1
+  local local_port="${REGISTRY_LOCAL_PORT:-5000}"
   local out
-  out="$(curl -sf "http://${REGISTRY_ADDR}/v2/${PLUGIN_REPO}/tags/list" 2>/dev/null || true)"
+  out="$(curl -sf "http://127.0.0.1:${local_port}/v2/${PLUGIN_REPO}/tags/list" 2>/dev/null || true)"
+  if [[ -z "$out" && -n "${REGISTRY_ADDR}" ]]; then
+    out="$(curl -sf "http://${REGISTRY_ADDR}/v2/${PLUGIN_REPO}/tags/list" 2>/dev/null || true)"
+  fi
   echo "$out" | grep -q "\"${IMAGE_TAG}\""
 }
 

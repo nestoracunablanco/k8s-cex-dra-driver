@@ -5,63 +5,86 @@
 # ---------------------------------------------------------------------------
 # 3. Preconditions
 # ---------------------------------------------------------------------------
-check_cex_availability() {
-  echo "kernel: $(uname -r)"
+
+# Run a shell snippet on the first schedulable node via a privileged debug pod.
+# The host root filesystem is mounted at /host inside the container, and the
+# snippet runs via "chroot /host bash -c ..." so that /sys, /dev, /proc, and
+# all host binaries (lszcrypt, modprobe, …) are fully visible.
+#
+# Uses the create→wait→logs→delete flow instead of --attach to avoid the
+# well-known race where kubectl loses the attach connection on fast-exiting pods.
+#
+# Usage: run_on_node <snippet>
+# Exits non-zero (and prints the pod log) when the snippet exits non-zero.
+# Resolve the first schedulable node and remove any leftover pod from a prior run.
+# Prints the node name to stdout.
+_ron_resolve_node() {
+  local pod_name="$1"
+  local node
+  node="$(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name | head -1)"
+  [[ -n "$node" ]] || fail "no Kubernetes nodes found"
+  kubectl delete pod "${pod_name}" --ignore-not-found=true --wait=true \
+    --timeout=30s >/dev/null 2>&1 || true
+  echo "$node"
+}
+
+# Base64-encode the snippet and apply the precondition pod template.
+# Both images are already cached on the node:
+#   quay.io/fedora/fedora:44        — bash + base64 for the init container
+#   registry.k8s.io/pause:3.10.1   — sandbox image used by Kubernetes 1.36
+_ron_create_pod() {
+  local node="$1" pod_name="$2" snippet="$3"
+  local encoded_snippet
+  encoded_snippet="$(printf '%s' "$snippet" | base64 -w0)"
+  NODE="${node}" POD_NAME="${pod_name}" ENCODED_SNIPPET="${encoded_snippet}" \
+    envsubst < "${SCRIPT_DIR}/precondition-pod.yaml.tmpl" | kubectl apply -f - >/dev/null
+  echo "  (pod ${pod_name} created on node ${node}; waiting for completion...)"
+}
+
+# Wait until the init container terminates (2-minute deadline).
+# Requires kubectl >= 1.23 for --for=jsonpath support.
+_ron_wait_pod() {
+  local pod_name="$1" node="$2"
+  if ! kubectl wait pod "${pod_name}" \
+      --for='jsonpath={.status.initContainerStatuses[0].state.terminated}' \
+      --timeout=120s 2>/dev/null; then
+    kubectl delete pod "${pod_name}" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    fail "timed out waiting for precondition pod on node ${node}"
+  fi
+}
+
+# Print pod logs, capture exit code, delete pod, and fail on non-zero.
+_ron_collect_and_cleanup() {
+  local pod_name="$1" node="$2"
   echo
-  echo "--- lszcrypt ---"
-  lszcrypt || fail "lszcrypt failed"
-  echo
-  if ! lszcrypt | grep -Eq '^[0-9a-fA-F]{2}\.[0-9a-fA-F]{4}'; then
-    fail "no AP queue (CARD.DOM) visible; CEX is not available on this node"
-  fi
-  [[ -d /sys/bus/ap ]] || fail "/sys/bus/ap missing"
+  kubectl logs "${pod_name}" -c "${pod_name}" 2>/dev/null || true
+  local exit_code
+  exit_code="$(kubectl get pod "${pod_name}" \
+    -o jsonpath='{.status.initContainerStatuses[0].state.terminated.exitCode}' \
+    2>/dev/null || echo 1)"
+  kubectl delete pod "${pod_name}" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+  [[ "${exit_code}" == "0" ]] || fail "precondition check failed on node ${node} (exit code ${exit_code})"
 }
 
-check_ap_masks() {
-  echo "--- apmask / aqmask ---"
-  local apmask aqmask leftover
-  apmask="$(cat /sys/bus/ap/apmask)"
-  aqmask="$(cat /sys/bus/ap/aqmask)"
-  echo "apmask=${apmask}"
-  echo "aqmask=${aqmask}"
-  leftover="$(echo "${apmask#0x}${aqmask#0x}" | tr -d 'fF')"
-  if [[ -n "$leftover" ]]; then
-    echo "WARNING: masks are not all-f; preflight may fail"
-    echo "  chzdev --type ap apmask=+0x00-0xff aqmask=+0x00-0xff"
-  fi
-}
-
-check_driver_override() {
-  echo "--- driver_override ---"
-  local overrides
-  overrides="$(find /sys/bus/ap /sys/devices/ap -name driver_override 2>/dev/null || true)"
-  if [[ -z "$overrides" ]]; then
-    fail "AP driver_override not found. Fedora 7.x should have it; RHCOS/RHEL 9 typically does not."
-  fi
-  echo "$overrides"
-  echo "driver_override: OK"
-}
-
-check_vfio_ap() {
-  if [[ ! -e /sys/devices/vfio_ap/matrix ]]; then
-    echo "vfio_ap not loaded; modprobe (requires sudo)"
-    need_cmd sudo
-    sudo modprobe vfio_ap || fail "modprobe vfio_ap failed"
-  fi
-  [[ -e /sys/devices/vfio_ap/matrix ]] || fail "/sys/devices/vfio_ap/matrix missing"
-  echo "vfio_ap: OK"
-  ls /sys/class/mdev_bus >/dev/null 2>&1 || fail "/sys/class/mdev_bus missing"
-  echo "mdev: OK"
+run_on_node() {
+  local snippet="$1" pod_name="cex-precond-check"
+  local node="$(_ron_resolve_node "${pod_name}")"
+  _ron_create_pod "${node}" "${pod_name}" "${snippet}"
+  _ron_wait_pod   "${pod_name}" "${node}"
+  _ron_collect_and_cleanup "${pod_name}" "${node}"
 }
 
 check_preconditions() {
   info "Preconditions (CEX, driver_override, vfio_ap)"
-  [[ "$(uname -m)" == "s390x" ]] || fail "this script is for s390x (got $(uname -m))"
 
-  check_cex_availability
-  check_ap_masks
-  check_driver_override
-  check_vfio_ap
+  local node
+  node="$(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name | head -1)"
+  [[ -n "$node" ]] || fail "no Kubernetes nodes found"
+
+  step "Running hardware checks on node ${node} via debug pod"
+
+  run_on_node "$(<"${SCRIPT_DIR}/lib/check-hardware.sh")"
+
   kubectl get nodes -o wide
 }
 
@@ -111,13 +134,26 @@ download_virtctl() {
   echo "virtctl: $(command -v virtctl)"
 }
 
+# Check if virtctl is already on PATH and matches the required version.
+# Returns 0 (skip download) if it matches, exits via fail on mismatch,
+# returns 1 if virtctl is not found.
+_check_virtctl_version() {
+  local ver="$1"
+  if ! command -v virtctl >/dev/null 2>&1; then
+    return 1
+  fi
+  local installed_ver="$(virtctl version --client 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  if [[ "${installed_ver}" == "${ver}" ]]; then
+    echo "virtctl: skip (already $(command -v virtctl) ${installed_ver})"
+    return 0
+  fi
+  fail "virtctl version mismatch: have ${installed_ver} at $(command -v virtctl), need ${ver}. Please update virtctl to ${ver} and re-run."
+}
+
 ensure_virtctl() {
   local ver="$1"
   export PATH="${WORK_DIR}:${PATH}"
-  if command -v virtctl >/dev/null 2>&1; then
-    echo "virtctl: skip (already $(command -v virtctl))"
-    return
-  fi
+  _check_virtctl_version "$ver" && return
   local arch="$(detect_arch)"
   mkdir -p "${WORK_DIR}"
   local bin="${WORK_DIR}/virtctl"

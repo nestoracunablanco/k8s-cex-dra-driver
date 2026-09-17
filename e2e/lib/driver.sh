@@ -1,35 +1,9 @@
 #!/usr/bin/env bash
-# deploy.sh — KubeVirt install/configure and CEX DRA driver build/deploy helpers.
-# Sourced by cex-dra.sh; expects SCRIPT_DIR, REPO_DIR, WORK_DIR, IMAGE, IMAGE_NAME,
-# IMAGE_TAG, OVERLAY, and kubectl/podman to be available in the calling environment.
+# driver.sh — CEX DRA driver image build/push/deploy helpers.
+# Sourced by cex-dra.sh; expects REPO_DIR, WORK_DIR, IMAGE, IMAGE_NAME,
+# IMAGE_TAG, OVERLAY, and kubectl/podman to be available in the calling
+# environment.
 
-install_kubevirt() {
-  info "Deploy KubeVirt"
-  assert_kubevirt_gone
-  KUBEVIRT_VERSION="$(resolve_kubevirt_version)"
-  echo "${KUBEVIRT_VERSION}" > "${WORK_DIR}/kubevirt.version"
-  echo "KubeVirt ${KUBEVIRT_VERSION}"
-  kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
-  kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
-  echo "Waiting for KubeVirt Available (can take several minutes)..."
-  kubectl wait -n kubevirt kubevirt/kubevirt --for=condition=Available --timeout=600s
-  kubectl get kubevirt -n kubevirt
-  ensure_virtctl "${KUBEVIRT_VERSION}"
-}
-
-configure_kubevirt() {
-  info "Configure KubeVirt feature gates and vfio-ap keep-list"
-  kubectl patch kubevirt kubevirt -n kubevirt --type merge \
-    --patch-file "${SCRIPT_DIR}/kubevirt-config-patch.yaml"
-  kubectl wait -n kubevirt kubevirt/kubevirt --for=condition=Available --timeout=300s
-  echo "featureGates / permittedHostDevices:"
-  kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.spec.configuration.developerConfiguration.featureGates}{"\n"}'
-  kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.spec.configuration.permittedHostDevices}{"\n"}'
-}
-
-# ---------------------------------------------------------------------------
-# 6. Registry + driver image (rootless) + deploy
-# ---------------------------------------------------------------------------
 build_image() {
   [[ -n "${IMAGE}" ]] || fail "registry address not set (install_registry first)"
   set_registry_image_vars
@@ -37,24 +11,32 @@ build_image() {
   local version="$(git describe --tags --always --dirty --long)"
   mkdir -p "${WORK_DIR}"
   info "CI build ${IMAGE} from ${version}"
-  podman build --platform=linux/s390x \
-    --build-arg VERSION="${version}" \
+  podman build --build-arg VERSION="${version}" \
     --no-cache \
     -t "${IMAGE}" \
     .
 }
 
-push_image() {
-  [[ -n "${IMAGE}" ]] || fail "registry address not set (install_registry first)"
-  echo "Pushing ${IMAGE} (HTTP registry, tls-verify=false)"
+# Retry helper: push a single image ref up to 3 times.
+push_with_retry() {
+  local push_target="$1"
   for attempt in 1 2 3; do
-    if podman push --tls-verify=false "${IMAGE}"; then
-      break
+    if podman push --tls-verify=false "${push_target}"; then
+      return 0
     fi
     [[ "$attempt" == "3" ]] && fail "podman push failed after 3 attempts"
     echo "  push attempt ${attempt} failed; retrying in 5s"
     sleep 5
   done
+}
+
+push_image() {
+  [[ -n "${IMAGE}" ]] || fail "registry address not set (install_registry first)"
+  local local_port="${REGISTRY_LOCAL_PORT:-5000}"
+  local push_target="127.0.0.1:${local_port}/${PLUGIN_REPO}:${IMAGE_TAG}"
+  podman tag "${IMAGE}" "${push_target}"
+  echo "Pushing ${push_target} via port-forward (HTTP registry, tls-verify=false)"
+  push_with_retry "${push_target}"
   image_in_registry || fail "push finished but ${IMAGE} is not in the registry catalog"
 }
 

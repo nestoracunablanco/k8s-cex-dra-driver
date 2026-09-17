@@ -3,6 +3,7 @@
 
 uninstall_registry() {
   step "Removing in-cluster registry (if present)"
+  stop_registry_port_forward
   kdel ns "${REGISTRY_NS}"
   require_ns_gone "${REGISTRY_NS}"
   assert_registry_gone

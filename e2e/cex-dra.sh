@@ -45,12 +45,14 @@ IMAGE_TAG="${IMAGE_TAG:-}"
 REGISTRY_NS="${REGISTRY_NS:-cex-dra-registry}"
 REGISTRY_NAME="${REGISTRY_NAME:-registry}"
 REGISTRY_NODEPORT="${REGISTRY_NODEPORT:-30511}"
+REGISTRY_LOCAL_PORT="${REGISTRY_LOCAL_PORT:-5000}"
 REGISTRY_IMAGE="${REGISTRY_IMAGE:-docker.io/library/registry:2}"
 IMPORT_IMAGE="${IMPORT_IMAGE:-quay.io/skopeo/stable:latest}"
 # Set after install_registry: NODE_IP:30511/cex-dra-kubeletplugin
 IMAGE_NAME=""
 IMAGE=""
 REGISTRY_ADDR=""
+REGISTRY_PF_PID=""
 
 # shellcheck source=lib/helpers.sh
 source "${SCRIPT_DIR}/lib/helpers.sh"
@@ -62,8 +64,10 @@ source "${SCRIPT_DIR}/lib/workloads.sh"
 source "${SCRIPT_DIR}/lib/uninstall.sh"
 # shellcheck source=lib/preconditions.sh
 source "${SCRIPT_DIR}/lib/preconditions.sh"
-# shellcheck source=lib/deploy.sh
-source "${SCRIPT_DIR}/lib/deploy.sh"
+# shellcheck source=lib/kubevirt.sh
+source "${SCRIPT_DIR}/lib/kubevirt.sh"
+# shellcheck source=lib/driver.sh
+source "${SCRIPT_DIR}/lib/driver.sh"
 # shellcheck source=lib/vm-check.sh
 source "${SCRIPT_DIR}/lib/vm-check.sh"
 # shellcheck source=lib/vm.sh
@@ -74,6 +78,7 @@ source "${SCRIPT_DIR}/lib/vm.sh"
 # 1-2), or run './deploy-cex-dra-fedora.sh clean' to tear everything down.
 on_exit() {
   local rc=$?
+  stop_registry_port_forward
   if [[ $rc -ne 0 ]]; then
     echo >&2
     echo "FAILED (exit ${rc}). Cluster state left in place for debugging." >&2
@@ -94,8 +99,8 @@ final_cleanup() {
   assert_driver_gone
   assert_registry_gone
   assert_kubevirt_gone
-  echo "Host lszcrypt after cleanup (queue should be back on the node):"
-  lszcrypt || true
+  echo "Node lszcrypt after cleanup (queue should be back on the node):"
+  run_on_node 'lszcrypt || true' || true
 }
 
 # ---------------------------------------------------------------------------
@@ -128,6 +133,13 @@ do_clean() {
 }
 
 do_deploy() {
+  info "Remove existing driver and registry (if any)"
+  delete_workloads
+  uninstall_driver
+  uninstall_registry
+  assert_driver_gone
+  assert_registry_gone
+
   install_registry
   build_image
   push_image
@@ -142,7 +154,11 @@ do_all() {
   check_preconditions
   install_kubevirt
   configure_kubevirt
-  do_deploy
+  install_registry
+  build_image
+  push_image
+  import_image_to_node
+  deploy_driver
   start_vm
   check_card_in_vm
 

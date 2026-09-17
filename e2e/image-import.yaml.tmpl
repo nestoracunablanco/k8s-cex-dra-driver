@@ -19,6 +19,7 @@ spec:
           command:
             - skopeo
             - copy
+            - --insecure-policy
             - --src-tls-verify=false
             - "${SRC}"
             - "containers-storage:${IMAGE}"

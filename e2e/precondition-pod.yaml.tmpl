@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${POD_NAME}
+spec:
+  restartPolicy: Never
+  hostPID: true
+  nodeSelector:
+    kubernetes.io/hostname: ${NODE}
+  tolerations:
+    - operator: Exists
+  initContainers:
+    - name: ${POD_NAME}
+      image: quay.io/fedora/fedora:44
+      command:
+        - bash
+        - -c
+        - "echo ${ENCODED_SNIPPET} | base64 -d | chroot /host bash"
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10.1
+  volumes:
+    - name: host-root
+      hostPath:
+        path: /

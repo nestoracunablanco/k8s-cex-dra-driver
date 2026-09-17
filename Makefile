@@ -33,7 +33,8 @@ CHECK_TARGETS := fmt-check lint vulncheck test manifests-check \
 .PHONY: all install clean \
         fmt fmt-check lint vulncheck test manifests-check bash-check \
         md-fmt md-fmt-check docs \
-        check health ci-health-report
+        check health ci-health-report \
+        e2e deploy
 
 # Both includes are optional and keyed on the tree rather than on the
 # environment: a directory that is not here takes its rules with it, and
@@ -148,3 +149,9 @@ ci-health-report:
 	mkdir -p $(HEALTH_DIR)
 	golangci-lint run --config .golangci-health.yml --issues-exit-code=0 \
 		--output.text.path=stdout --output.json.path=$(HEALTH_REPORT) $(GO_PKGS)
+
+e2e:
+	bash e2e/cex-dra.sh
+
+deploy:
+	bash e2e/cex-dra.sh deploy
